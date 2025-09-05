@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 설정 
+CONTAINER_NAME="honeypot"
+PYTHON_SCRIPT="parser.py" # 파싱할 파이썬 스크립트
+OUTPUT_JSON="events.json" # 파서가 만들어낼 최종 JSON 파일
+S3_BUCKET="honeypot-bk" 
+CLOUDFRONT_DISTRIBUTION_ID="E30QVMT02B85G3" # 없으면 ""로 둠
+
+# 1-A. cowrie.json의 물리적 경로를 직접 지정
+HOST_LOG_PATH="/var/lib/docker/volumes/03f4eec92fcc6afc22caaa3349646dc73520a2b215e987c961846ee9a0f52800/_data/log/cowrie/cowrie.json"
+# ===== 설정 끝 =====
+
+echo "=================================================="
+echo "[$(date)] 데이터 업데이트 스크립트 시작"
+echo "=================================================="
+
+# 0) 의존성 체크
+need() { command -v "$1" >/dev/null 2>&1 || { echo "오류: '$1' 명령을 찾을 수 없습니다."; exit 1; }; }
+need docker
+need aws
+need python3
+
+# 1) 지정된 물리적 경로에서 cowrie.json 복사
+echo "--> 1. cowrie.json 추출 중 (지정된 물리적 경로 사용)..."
+TMP_JSON="./cowrie.json"
+
+if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+echo "오류: 컨테이너 '$CONTAINER_NAME' 가 실행 중이 아닙니다."
+exit 1
+fi
+
+# sudo를 사용하여 지정된 물리적 경로에서 파일 복사
+if ! sudo cp "$HOST_LOG_PATH" "$TMP_JSON"; then
+echo "오류: 물리적 경로에서 파일 복사에 실패했습니다. 경로: $HOST_LOG_PATH"
+exit 1
+fi
+
+# 복사된 파일의 소유권을 현재 사용자로 변경
+sudo chown "$(id -u):$(id -g)" "$TMP_JSON"
+echo " 성공: $(du -h "$TMP_JSON" | awk '{print $1" ("$2")"}') 복사됨"
+
+
+# 2) 파이썬 파서 실행
+echo "--> 2. 파이썬 파서 실행: $PYTHON_SCRIPT"
+python3 "$PYTHON_SCRIPT"
+if [[ ! -f "$OUTPUT_JSON" ]]; then
+echo "오류: 파서 실행 후 '${OUTPUT_JSON}' 파일이 존재하지 않습니다."
+exit 1
+fi
+echo " 성공: '${OUTPUT_JSON}' 생성"
+
+# 3) S3 업로드
+echo "--> 3. S3 업로드: s3://${S3_BUCKET}/${OUTPUT_JSON}"
+aws s3 cp "$OUTPUT_JSON" "s3://${S3_BUCKET}/${OUTPUT_JSON}" \
+--content-type "application/json" --no-progress
+echo " 성공: S3 업로드 완료"
+
+# 4) CloudFront 캐시 무효화 (ID가 설정된 경우에만)
+if [[ -n "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]]; then
+echo "--> 4. CloudFront Invalidation 요청"
+aws cloudfront create-invalidation \
+--distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+--paths "/${OUTPUT_JSON}" >/dev/null
+echo " 성공: Invalidation 요청 완료"
+else
+echo "--> 4. CloudFront Invalidation 생략 (배포 ID 미설정)"
+fi
+
+echo ""
+echo "[$(date)] 모든 작업 완료"
+echo "=================================================="

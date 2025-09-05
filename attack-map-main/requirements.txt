@@ -1,0 +1,12 @@
+streamlit
+pydeck
+pandas
+altair
+requests
+boto3
+streamlit-autorefresh
+python-dotenv
+schedule
+maxminddb
+pycountry
+scikit-learn
